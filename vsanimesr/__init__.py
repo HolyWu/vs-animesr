@@ -116,7 +116,7 @@ def animesr(
         dimensions = f'{pad_w}x{pad_h}'
         precision = 'fp16' if fp16 else 'fp32'
         trt_engine_path = os.path.join(
-            trt_cache_path,
+            os.path.realpath(trt_cache_path),
             (
                 f'{model_name}'
                 + f'_{device_name}'
