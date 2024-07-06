@@ -1,8 +1,36 @@
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from .arch_util import ResidualBlockNoBN
+from .interpolate import interpolate
+
+
+class MyPixelShuffle(nn.Module):
+    def __init__(self, upscale_factor):
+        super().__init__()
+        self.upscale_factor = upscale_factor
+
+    def forward(self, x):
+        b, c, hh, hw = x.size()
+        out_channel = c // (self.upscale_factor**2)
+        h = hh * self.upscale_factor
+        w = hw * self.upscale_factor
+        x_view = x.view(b, out_channel, self.upscale_factor, self.upscale_factor, hh, hw)
+        return x_view.permute(0, 1, 4, 2, 5, 3).reshape(b, out_channel, h, w)
+
+
+class MyPixelUnshuffle(nn.Module):
+    def __init__(self, downscale_factor):
+        super().__init__()
+        self.downscale_factor = downscale_factor
+
+    def forward(self, x):
+        b, c, hh, hw = x.size()
+        out_channel = c * (self.downscale_factor**2)
+        h = hh // self.downscale_factor
+        w = hw // self.downscale_factor
+        x_view = x.view(b, c, h, self.downscale_factor, w, self.downscale_factor)
+        return x_view.permute(0, 1, 3, 5, 2, 4).reshape(b, out_channel, h, w)
 
 
 class RightAlignMSConvResidualBlocks(nn.Module):
@@ -34,9 +62,6 @@ class RightAlignMSConvResidualBlocks(nn.Module):
         for _ in range(num_block[2]):
             self.body_s4_first.append(ResidualBlockNoBN(num_feat=num_state_ch))
 
-        self.upsample_x2 = nn.Upsample(scale_factor=2, mode='bilinear')
-        self.upsample_x4 = nn.Upsample(scale_factor=4, mode='bilinear')
-
         self.fusion = nn.Sequential(
             nn.Conv2d(3 * num_state_ch, 2 * num_out_ch, 3, 1, 1, bias=True),
             nn.LeakyReLU(negative_slope=0.1, inplace=True),
@@ -44,12 +69,7 @@ class RightAlignMSConvResidualBlocks(nn.Module):
         )
 
     def up(self, x, scale=2):
-        if isinstance(x, int):
-            return x
-        elif scale == 2:
-            return self.upsample_x2(x)
-        else:
-            return self.upsample_x4(x)
+        return interpolate(x, scale_factor=scale, mode='bilinear')
 
     def forward(self, x):
         x_s1 = self.conv_s1_first(x)
@@ -69,7 +89,7 @@ class RightAlignMSConvResidualBlocks(nn.Module):
                 x_s4 = self.body_s4_first[i - self.num_block[0] + self.num_block[2]](x_s4)
                 flag_s4 = True
 
-        x_fusion = self.fusion(torch.cat((x_s1, self.upsample_x2(x_s2), self.upsample_x4(x_s4)), dim=1))
+        x_fusion = self.fusion(torch.cat((x_s1, self.up(x_s2, 2), self.up(x_s4, 4)), dim=1))
 
         return x_fusion
 
@@ -88,8 +108,8 @@ class MSRSWVSR(nn.Module):
         self.recurrent_cell = RightAlignMSConvResidualBlocks(3 * 3 + 3 * netscale * netscale + num_feat, num_feat,
                                                              num_feat + 3 * netscale * netscale, num_block)
         self.lrelu = nn.LeakyReLU(negative_slope=0.1)
-        self.pixel_shuffle = nn.PixelShuffle(netscale)
-        self.pixel_unshuffle = nn.PixelUnshuffle(netscale)
+        self.pixel_shuffle = MyPixelShuffle(netscale)
+        self.pixel_unshuffle = MyPixelUnshuffle(netscale)
         self.netscale = netscale
 
     def forward(self, x, fb, state):
@@ -98,7 +118,7 @@ class MSRSWVSR(nn.Module):
         inp = torch.cat((x, self.pixel_unshuffle(fb), state), dim=1)
         # the out contains both state and sr frame
         out = self.recurrent_cell(inp)
-        out_img = self.pixel_shuffle(out[:, :3 * self.netscale * self.netscale]) + F.interpolate(
+        out_img = self.pixel_shuffle(out[:, :3 * self.netscale * self.netscale]) + interpolate(
             res, scale_factor=self.netscale, mode='bilinear')
         out_state = self.lrelu(out[:, 3 * self.netscale * self.netscale:])
 
