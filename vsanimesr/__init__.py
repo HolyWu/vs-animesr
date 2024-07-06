@@ -12,7 +12,7 @@ import vapoursynth as vs
 
 from .vsr_arch import MSRSWVSR
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
